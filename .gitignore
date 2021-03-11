@@ -14,3 +14,6 @@ cover.out
 
 # ignore asdf local versions
 /.tool-versions
+/bundle
+/testbin
+/bin

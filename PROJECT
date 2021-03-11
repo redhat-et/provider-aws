@@ -1,3 +1,13 @@
-version: "1"
 domain: crossplane.io
+layout: go.kubebuilder.io/v3
+projectName: provider-aws
 repo: github.com/crossplane/provider-aws
+resources:
+- crdVersion: v1
+  group: cache
+  kind: Memcached
+  version: v1alpha1
+version: 3-alpha
+plugins:
+  manifests.sdk.operatorframework.io/v2: {}
+  scorecard.sdk.operatorframework.io/v2: {}

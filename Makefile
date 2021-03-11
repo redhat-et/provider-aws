@@ -1,135 +1,139 @@
-# ====================================================================================
-# Setup Project
+# VERSION defines the project version for the bundle. 
+# Update this value when you upgrade the version of your project.
+# To re-generate a bundle for another specific version without changing the standard setup, you can:
+# - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
+# - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
+VERSION ?= 0.0.1
 
-PROJECT_NAME := provider-aws
-PROJECT_REPO := github.com/crossplane/$(PROJECT_NAME)
+# CHANNELS define the bundle channels used in the bundle. 
+# Add a new line here if you would like to change its default config. (E.g CHANNELS = "preview,fast,stable")
+# To re-generate a bundle for other specific channels without changing the standard setup, you can:
+# - use the CHANNELS as arg of the bundle target (e.g make bundle CHANNELS=preview,fast,stable)
+# - use environment variables to overwrite this value (e.g export CHANNELS="preview,fast,stable")
+ifneq ($(origin CHANNELS), undefined)
+BUNDLE_CHANNELS := --channels=$(CHANNELS)
+endif
 
-PLATFORMS ?= linux_amd64 linux_arm64
-# -include will silently skip missing files, which allows us
-# to load those files with a target in the Makefile. If only
-# "include" was used, the make command would fail and refuse
-# to run a target until the include commands succeeded.
--include build/makelib/common.mk
+# DEFAULT_CHANNEL defines the default channel used in the bundle. 
+# Add a new line here if you would like to change its default config. (E.g DEFAULT_CHANNEL = "stable")
+# To re-generate a bundle for any other default channel without changing the default setup, you can:
+# - use the DEFAULT_CHANNEL as arg of the bundle target (e.g make bundle DEFAULT_CHANNEL=stable)
+# - use environment variables to overwrite this value (e.g export DEFAULT_CHANNEL="stable")
+ifneq ($(origin DEFAULT_CHANNEL), undefined)
+BUNDLE_DEFAULT_CHANNEL := --default-channel=$(DEFAULT_CHANNEL)
+endif
+BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 
-# ====================================================================================
-# Setup Output
+# BUNDLE_IMG defines the image:tag used for the bundle. 
+# You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
+BUNDLE_IMG ?= controller-bundle:$(VERSION)
 
--include build/makelib/output.mk
+# Image URL to use all building/pushing image targets
+IMG ?= controller:latest
+# Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
+CRD_OPTIONS ?= "crd:trivialVersions=true,preserveUnknownFields=false,crdVersions=v1,allowDangerousTypes=true"
 
-# ====================================================================================
-# Setup Go
+# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
+ifeq (,$(shell go env GOBIN))
+GOBIN=$(shell go env GOPATH)/bin
+else
+GOBIN=$(shell go env GOBIN)
+endif
 
-# Set a sane default so that the nprocs calculation below is less noisy on the initial
-# loading of this file
-NPROCS ?= 1
+all: manager
 
-# each of our test suites starts a kube-apiserver and running many test suites in
-# parallel can lead to high CPU utilization. by default we reduce the parallelism
-# to half the number of CPU cores.
-GO_TEST_PARALLEL := $(shell echo $$(( $(NPROCS) / 2 )))
+# Run tests
+ENVTEST_ASSETS_DIR=$(shell pwd)/testbin
+test: generate fmt vet manifests
+	mkdir -p ${ENVTEST_ASSETS_DIR}
+	test -f ${ENVTEST_ASSETS_DIR}/setup-envtest.sh || curl -sSLo ${ENVTEST_ASSETS_DIR}/setup-envtest.sh https://raw.githubusercontent.com/kubernetes-sigs/controller-runtime/v0.7.0/hack/setup-envtest.sh
+	source ${ENVTEST_ASSETS_DIR}/setup-envtest.sh; fetch_envtest_tools $(ENVTEST_ASSETS_DIR); setup_envtest_env $(ENVTEST_ASSETS_DIR); go test ./... -coverprofile cover.out
 
-GO_STATIC_PACKAGES = $(GO_PROJECT)/cmd/provider
-GO_LDFLAGS += -X $(GO_PROJECT)/pkg/version.Version=$(VERSION)
-GO_SUBDIRS += cmd pkg apis
-GO111MODULE = on
--include build/makelib/golang.mk
+# Build manager binary
+manager: generate fmt vet
+	go build -o bin/manager main.go
 
-# ====================================================================================
-# Setup Kubernetes tools
+# Run against the configured Kubernetes cluster in ~/.kube/config
+run: generate fmt vet manifests
+	go run ./main.go
 
--include build/makelib/k8s_tools.mk
+# Install CRDs into a cluster
+install: manifests kustomize
+	$(KUSTOMIZE) build config/crd | kubectl apply -f -
 
-# ====================================================================================
-# Setup Images
+# Uninstall CRDs from a cluster
+uninstall: manifests kustomize
+	$(KUSTOMIZE) build config/crd | kubectl delete -f -
 
-DOCKER_REGISTRY ?= crossplane
-IMAGES = provider-aws provider-aws-controller
--include build/makelib/image.mk
+# Deploy controller in the configured Kubernetes cluster in ~/.kube/config
+deploy: manifests kustomize
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	$(KUSTOMIZE) build config/default | kubectl apply -f -
 
-# ====================================================================================
-# Targets
+# UnDeploy controller from the configured Kubernetes cluster in ~/.kube/config
+undeploy:
+	$(KUSTOMIZE) build config/default | kubectl delete -f -
 
-# run `make help` to see the targets and options
+# Generate manifests e.g. CRD, RBAC etc.
+manifests: controller-gen
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	./hack/gen_rbac.sh > rbac.go
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=manager-role
 
-# We want submodules to be set up the first time `make` is run.
-# We manage the build/ folder and its Makefiles as a submodule.
-# The first time `make` is run, the includes of build/*.mk files will
-# all fail, and this target will be run. The next time, the default as defined
-# by the includes will be run instead.
-fallthrough: submodules
-	@echo Initial setup complete. Running make again . . .
-	@make
+# Run go fmt against code
+fmt:
+	go fmt ./...
 
-# Generate a coverage report for cobertura applying exclusions on
-# - generated file
-cobertura:
-	@cat $(GO_TEST_OUTPUT)/coverage.txt | \
-		grep -v zz_generated.deepcopy | \
-		$(GOCOVER_COBERTURA) > $(GO_TEST_OUTPUT)/cobertura-coverage.xml
+# Run go vet against code
+vet:
+	go vet -composites=false ./...
 
-crds.clean:
-	@$(INFO) cleaning generated CRDs
-	@find package/crds -name *.yaml -exec sed -i.sed -e '1,2d' {} \; || $(FAIL)
-	@find package/crds -name *.yaml.sed -delete || $(FAIL)
-	@$(OK) cleaned generated CRDs
+# Generate code
+generate: controller-gen
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
-generate: crds.clean
+# Build the docker image
+docker-build: test
+	docker build -t ${IMG} .
 
-# Ensure a PR is ready for review.
-reviewable: generate lint
-	@go mod tidy
+# Push the docker image
+docker-push:
+	docker push ${IMG}
 
-# Ensure branch is clean.
-check-diff: reviewable
-	@$(INFO) checking that branch is clean
-	@test -z "$$(git status --porcelain)" || $(FAIL)
-	@$(OK) branch is clean
+# Download controller-gen locally if necessary
+CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
+controller-gen:
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.4.1)
 
-manifests:
-	@$(WARN) Deprecated. Please run make generate instead.
+# Download kustomize locally if necessary
+KUSTOMIZE = $(shell pwd)/bin/kustomize
+kustomize:
+	$(call go-get-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v3@v3.8.7)
 
-# integration tests
-e2e.run: test-integration
-
-# Run integration tests.
-test-integration: $(KIND) $(KUBECTL) $(HELM3)
-	@$(INFO) running integration tests using kind $(KIND_VERSION)
-	@$(ROOT_DIR)/cluster/local/integration_tests.sh || $(FAIL)
-	@$(OK) integration tests passed
-
-# Update the submodules, such as the common build scripts.
-submodules:
-	@git submodule sync
-	@git submodule update --init --recursive
-
-# This is for running out-of-cluster locally, and is for convenience. Running
-# this make target will print out the command which was used. For more control,
-# try running the binary directly with different arguments.
-run: go.build
-	@$(INFO) Running Crossplane locally out-of-cluster . . .
-	@# To see other arguments that can be provided, run the command with --help instead
-	$(GO_OUT_DIR)/provider --debug
-
-.PHONY: cobertura reviewable manifests submodules fallthrough test-integration run crds.clean
-
-# ====================================================================================
-# Special Targets
-
-define CROSSPLANE_MAKE_HELP
-Crossplane Targets:
-    cobertura             Generate a coverage report for cobertura applying exclusions on generated files.
-    reviewable            Ensure a PR is ready for review.
-    submodules            Update the submodules, such as the common build scripts.
-    run                   Run crossplane locally, out-of-cluster. Useful for development.
-
+# go-get-tool will 'go get' any package $2 and install it to $1.
+PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
+define go-get-tool
+@[ -f $(1) ] || { \
+set -e ;\
+TMP_DIR=$$(mktemp -d) ;\
+cd $$TMP_DIR ;\
+go mod init tmp ;\
+echo "Downloading $(2)" ;\
+GOBIN=$(PROJECT_DIR)/bin go get $(2) ;\
+rm -rf $$TMP_DIR ;\
+}
 endef
-# The reason CROSSPLANE_MAKE_HELP is used instead of CROSSPLANE_HELP is because the crossplane
-# binary will try to use CROSSPLANE_HELP if it is set, and this is for something different.
-export CROSSPLANE_MAKE_HELP
 
-crossplane.help:
-	@echo "$$CROSSPLANE_MAKE_HELP"
+# Generate bundle manifests and metadata, then validate generated files.
+.PHONY: bundle
+bundle: manifests kustomize
+	operator-sdk generate kustomize manifests -q
+	cd config/crd && kustomize edit add resource bases/* && cd ../..
+	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	$(KUSTOMIZE) build config/manifests | operator-sdk generate bundle -q --overwrite --default-channel alpha --version $(VERSION) $(BUNDLE_METADATA_OPTS)
+	operator-sdk bundle validate ./bundle
 
-help-special: crossplane.help
-
-.PHONY: crossplane.help help-special
+# Build the bundle image.
+.PHONY: bundle-build
+bundle-build:
+	docker build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
