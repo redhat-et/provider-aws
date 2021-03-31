@@ -51,11 +51,11 @@ test: generate fmt vet manifests
 
 # Build manager binary
 manager: generate fmt vet
-	go build -o bin/manager main.go
+	go build -o bin/manager cmd/provider/main.go
 
 # Run against the configured Kubernetes cluster in ~/.kube/config
 run: generate fmt vet manifests
-	go run ./main.go
+	go run ./cmd/provider/main.go
 
 # Install CRDs into a cluster
 install: manifests kustomize
@@ -77,7 +77,7 @@ undeploy:
 # Generate manifests e.g. CRD, RBAC etc.
 manifests: controller-gen
 	$(CONTROLLER_GEN) $(CRD_OPTIONS) webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	./hack/gen_rbac.sh > rbac.go
+	./gen_rbac.sh > rbac.go
 	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=manager-role
 
 # Run go fmt against code
@@ -93,7 +93,7 @@ generate: controller-gen
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 # Build the docker image
-docker-build: test
+docker-build: generate fmt vet manifests
 	docker build -t ${IMG} .
 
 # Push the docker image
@@ -127,7 +127,7 @@ endef
 # Generate bundle manifests and metadata, then validate generated files.
 .PHONY: bundle
 bundle: manifests kustomize
-	operator-sdk generate kustomize manifests -q
+	operator-sdk generate kustomize manifests -q --apis-dir apis
 	cd config/crd && kustomize edit add resource bases/* && cd ../..
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | operator-sdk generate bundle -q --overwrite --default-channel alpha --version $(VERSION) $(BUNDLE_METADATA_OPTS)
